@@ -942,7 +942,7 @@ func (s *httpdServer) handleClientSharePartialDownload(w http.ResponseWriter, r 
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	if err := validateBrowsableShare(share, connection); err != nil {
 		s.renderClientMessagePage(w, r, util.I18nShareAccessErrorTitle, getRespStatus(err), err, "")
@@ -991,7 +991,7 @@ func (s *httpdServer) handleShareGetDirContents(w http.ResponseWriter, r *http.R
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	if err := validateBrowsableShare(share, connection); err != nil {
 		sendAPIResponse(w, r, err, getI18NErrorString(err, util.I18nError500Message), getRespStatus(err))
@@ -1016,18 +1016,14 @@ func (s *httpdServer) handleShareGetDirContents(w http.ResponseWriter, r *http.R
 	defer lister.Close()
 
 	dataGetter := func(limit, offset int) ([]byte, int, error) {
-		contents, err := lister.Next(limit)
-		if errors.Is(err, io.EOF) {
-			err = nil
-		}
+		contents, finished, err := nextRenderableEntries(lister, limit, func(info os.FileInfo) bool {
+			return info.Mode().IsDir() || info.Mode().IsRegular()
+		})
 		if err != nil {
 			return nil, 0, err
 		}
 		results := make([]map[string]any, 0, len(contents))
 		for idx, info := range contents {
-			if !info.Mode().IsDir() && !info.Mode().IsRegular() {
-				continue
-			}
 			res := make(map[string]any)
 			res["id"] = offset + idx + 1
 			if info.IsDir() {
@@ -1046,8 +1042,8 @@ func (s *httpdServer) handleShareGetDirContents(w http.ResponseWriter, r *http.R
 		}
 		data, err := json.Marshal(results)
 		count := limit
-		if len(results) == 0 {
-			count = 0
+		if finished {
+			count = len(results)
 		}
 		return data, count, err
 	}
@@ -1062,7 +1058,7 @@ func (s *httpdServer) handleClientUploadToShare(w http.ResponseWriter, r *http.R
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	if share.Scope == dataprovider.ShareScopeReadWrite {
 		http.Redirect(w, r, path.Join(webClientPubSharesPath, share.ShareID, "browse"), http.StatusFound)
@@ -1078,7 +1074,7 @@ func (s *httpdServer) handleShareGetFiles(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	if err := validateBrowsableShare(share, connection); err != nil {
 		s.renderClientMessagePage(w, r, util.I18nShareAccessErrorTitle, getRespStatus(err), err, "")
@@ -1117,7 +1113,7 @@ func (s *httpdServer) handleShareGetFiles(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if status, err := downloadFile(w, r, connection, name, info, false, &share); err != nil {
-		dataprovider.UpdateShareLastUse(&share, -1) //nolint:errcheck
+		_ = dataprovider.UpdateShareLastUse(&share, -1)
 		if status > 0 {
 			s.renderSharedFilesPage(w, r, path.Dir(share.GetRelativePath(name)),
 				util.NewI18nError(err, i18nFsMsg(getRespStatus(err))), share)
@@ -1132,7 +1128,7 @@ func (s *httpdServer) handleShareViewPDF(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	name := util.CleanPath(r.URL.Query().Get("path"))
 	data := viewPDFPage{
@@ -1153,7 +1149,7 @@ func (s *httpdServer) handleShareGetPDF(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	if err := validateBrowsableShare(share, connection); err != nil {
 		s.renderClientMessagePage(w, r, util.I18nShareAccessErrorTitle, getRespStatus(err), err, "")
@@ -1183,7 +1179,7 @@ func (s *httpdServer) handleShareGetPDF(w http.ResponseWriter, r *http.Request) 
 		s.renderClientBadRequestPage(w, r, util.NewI18nError(fmt.Errorf("%q is not a file", name), util.I18nErrorPDFMessage))
 		return
 	}
-	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
+	_ = connection.User.CheckFsRoot(connection.ID)
 	if err := s.ensurePDF(w, r, name, connection); err != nil {
 		return
 	}
@@ -1192,7 +1188,7 @@ func (s *httpdServer) handleShareGetPDF(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if _, err := downloadFile(w, r, connection, name, info, true, &share); err != nil {
-		dataprovider.UpdateShareLastUse(&share, -1) //nolint:errcheck
+		_ = dataprovider.UpdateShareLastUse(&share, -1)
 	}
 }
 
@@ -1236,10 +1232,9 @@ func (s *httpdServer) handleClientGetDirContents(w http.ResponseWriter, r *http.
 
 	dirTree := r.URL.Query().Get("dirtree") == "1"
 	dataGetter := func(limit, offset int) ([]byte, int, error) {
-		contents, err := lister.Next(limit)
-		if errors.Is(err, io.EOF) {
-			err = nil
-		}
+		contents, finished, err := nextRenderableEntries(lister, limit, func(info os.FileInfo) bool {
+			return info.IsDir() || !dirTree
+		})
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1253,9 +1248,6 @@ func (s *httpdServer) handleClientGetDirContents(w http.ResponseWriter, r *http.
 				res["size"] = ""
 				res["dir_path"] = url.QueryEscape(path.Join(name, info.Name()))
 			} else {
-				if dirTree {
-					continue
-				}
 				res["type"] = "2"
 				if info.Mode()&os.ModeSymlink != 0 {
 					res["size"] = ""
@@ -1273,8 +1265,8 @@ func (s *httpdServer) handleClientGetDirContents(w http.ResponseWriter, r *http.
 		}
 		data, err := json.Marshal(results)
 		count := limit
-		if len(results) == 0 {
-			count = 0
+		if finished {
+			count = len(results)
 		}
 		return data, count, err
 	}
@@ -1396,7 +1388,7 @@ func (s *httpdServer) handleClientEditFile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
+	_ = connection.User.CheckFsRoot(connection.ID)
 	reader, err := connection.getFileReader(name, 0, r.Method)
 	if err != nil {
 		s.renderClientMessagePage(w, r, util.I18nErrorEditorTitle, getRespStatus(err),
@@ -1644,7 +1636,7 @@ func (s *httpdServer) handleWebClientChangePwd(w http.ResponseWriter, r *http.Re
 	s.renderClientChangePasswordPage(w, r, nil)
 }
 
-func (s *httpdServer) handleWebClientProfilePost(w http.ResponseWriter, r *http.Request) { //nolint:gocyclo
+func (s *httpdServer) handleWebClientProfilePost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	err := r.ParseForm()
 	if err != nil {
@@ -1874,11 +1866,11 @@ func (s *httpdServer) handleClientGetPDF(w http.ResponseWriter, r *http.Request)
 		s.renderClientBadRequestPage(w, r, util.NewI18nError(fmt.Errorf("%q is not a file", name), util.I18nErrorPDFMessage))
 		return
 	}
-	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
+	_ = connection.User.CheckFsRoot(connection.ID)
 	if err := s.ensurePDF(w, r, name, connection); err != nil {
 		return
 	}
-	downloadFile(w, r, connection, name, info, true, nil) //nolint:errcheck
+	_, _ = downloadFile(w, r, connection, name, info, true, nil)
 }
 
 func (s *httpdServer) ensurePDF(w http.ResponseWriter, r *http.Request, name string, connection *Connection) error {
@@ -1922,7 +1914,7 @@ func (s *httpdServer) handleClientShareLoginPost(w http.ResponseWriter, r *http.
 		s.renderShareLoginPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
-	invalidateToken(r)
+	_ = invalidateToken(r) // best effort: invalidates the pre-login token
 	shareID := getURLParam(r, "id")
 	share, err := dataprovider.ShareExists(shareID, "")
 	if err != nil {
@@ -1931,7 +1923,7 @@ func (s *httpdServer) handleClientShareLoginPost(w http.ResponseWriter, r *http.
 	}
 	match, err := share.CheckCredentials(strings.TrimSpace(r.Form.Get("share_password")))
 	if !match || err != nil {
-		handleDefenderEventLoginFailed(ipAddr, dataprovider.ErrInvalidCredentials) //nolint:errcheck
+		_ = handleDefenderEventLoginFailed(ipAddr, dataprovider.ErrInvalidCredentials)
 		s.renderShareLoginPage(w, r, util.NewI18nError(dataprovider.ErrInvalidCredentials, util.I18nErrorInvalidCredentials))
 		return
 	}
@@ -1941,6 +1933,7 @@ func (s *httpdServer) handleClientShareLoginPost(w http.ResponseWriter, r *http.
 	c := &jwt.Claims{
 		Username: shareID,
 	}
+	c.Subject = share.GetSignature()
 	if isRedirect {
 		c.Ref = next
 	}
@@ -1979,7 +1972,7 @@ func (s *httpdServer) handleClientSharedFile(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	query := ""
 	if r.URL.RawQuery != "" {
@@ -2008,7 +2001,7 @@ func (s *httpdServer) handleClientShareCheckExist(w http.ResponseWriter, r *http
 	if err != nil {
 		return
 	}
-	defer connection.CloseFS() //nolint:errcheck
+	defer connection.CloseFS()
 
 	if err := validateBrowsableShare(share, connection); err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
@@ -2052,33 +2045,34 @@ func doCheckExist(w http.ResponseWriter, r *http.Request, connection *Connection
 	}
 	defer lister.Close()
 
+	found := 0
 	dataGetter := func(limit, _ int) ([]byte, int, error) {
-		contents, err := lister.Next(limit)
-		if errors.Is(err, io.EOF) {
-			err = nil
-		}
+		contents, finished, err := nextRenderableEntries(lister, limit, func(info os.FileInfo) bool {
+			return slices.Contains(filesList.Files, info.Name())
+		})
 		if err != nil {
 			return nil, 0, err
 		}
-		existing := make([]map[string]any, 0)
+		existing := make([]map[string]any, 0, len(contents))
 		for _, info := range contents {
-			if slices.Contains(filesList.Files, info.Name()) {
-				res := make(map[string]any)
-				res["name"] = info.Name()
-				if info.IsDir() {
-					res["type"] = "1"
-					res["size"] = ""
-				} else {
-					res["type"] = "2"
-					res["size"] = info.Size()
-				}
-				existing = append(existing, res)
+			res := make(map[string]any)
+			res["name"] = info.Name()
+			if info.IsDir() {
+				res["type"] = "1"
+				res["size"] = ""
+			} else {
+				res["type"] = "2"
+				res["size"] = info.Size()
 			}
+			existing = append(existing, res)
 		}
+		found += len(existing)
 		data, err := json.Marshal(existing)
 		count := limit
-		if len(existing) == 0 {
-			count = 0
+		// proving that a name is missing requires the whole listing, finding
+		// every checked one does not
+		if finished || found >= len(filesList.Files) {
+			count = len(existing)
 		}
 		return data, count, err
 	}

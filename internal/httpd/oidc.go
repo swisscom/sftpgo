@@ -39,6 +39,7 @@ import (
 
 const (
 	oidcCookieKey          = "oidc"
+	oidcBrowserCookieKey   = "oidc_browser"
 	adminRoleFieldValue    = "admin"
 	authStateValidity      = 1 * 60 * 1000 // 1 minute
 	maxWebClientNextLength = 4096
@@ -166,7 +167,7 @@ func (o *OIDC) initialize() error {
 	claims := make(map[string]any)
 	// we cannot get an error here because the response body was already parsed as JSON
 	// on provider creation
-	provider.Claims(&claims) //nolint:errcheck
+	_ = provider.Claims(&claims)
 	endSessionEndPoint, ok := claims["end_session_endpoint"]
 	if ok {
 		if val, ok := endSessionEndPoint.(string); ok {
@@ -203,6 +204,7 @@ type oidcPendingAuth struct {
 	Audience tokenAudience `json:"audience"`
 	IssuedAt int64         `json:"issued_at"`
 	Next     string        `json:"next,omitempty"`
+	Browser  string        `json:"browser,omitempty"`
 }
 
 func newOIDCPendingAuth(audience tokenAudience) oidcPendingAuth {
@@ -468,7 +470,7 @@ func (t *oidcToken) getUser(r *http.Request) error {
 		updateLoginMetrics(user, dataprovider.LoginMethodIDP, ipAddr, err, r)
 		return err
 	}
-	defer user.CloseFs() //nolint:errcheck
+	defer user.CloseFs()
 	err = user.CheckFsRoot(connectionID)
 	if err != nil {
 		logger.Warn(logSender, connectionID, "unable to check fs root: %v", err)
@@ -627,6 +629,7 @@ func (s *httpdServer) oidcLoginRedirect(w http.ResponseWriter, r *http.Request, 
 			pendingAuth.Next = target
 		}
 	}
+	pendingAuth.Browser = setAuthBrowserID(w, r, oidcBrowserCookieKey)
 	oidcMgr.addPendingAuth(pendingAuth)
 	http.Redirect(w, r, s.binding.OIDC.oauth2Config.AuthCodeURL(pendingAuth.State,
 		oidc.Nonce(pendingAuth.Nonce)), http.StatusFound)
@@ -650,6 +653,13 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 		oidcMgr.removePendingAuth(state)
 		s.renderClientMessagePage(w, r, util.I18nInvalidAuthReqTitle, http.StatusBadRequest,
 			util.NewI18nError(err, util.I18nInvalidAuth), "")
+		return
+	}
+	if !checkAuthBrowserID(r, oidcBrowserCookieKey, authReq.Browser) {
+		logger.Debug(logSender, "", "oidc authentication request started by a different browser")
+		s.renderClientMessagePage(w, r, util.I18nInvalidAuthReqTitle, http.StatusBadRequest,
+			util.NewI18nError(errors.New("the authorization request was started by a different browser"),
+				util.I18nInvalidAuth), "")
 		return
 	}
 	oidcMgr.removePendingAuth(state)

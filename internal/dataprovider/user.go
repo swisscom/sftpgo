@@ -379,14 +379,24 @@ func (u *User) isTimeBasedAccessAllowed(when time.Time) bool {
 	return false
 }
 
-// CheckLoginConditions checks user access restrictions
-func (u *User) CheckLoginConditions() error {
+// CheckAccountValidity returns an error if the account is disabled or expired.
+// Time based access restrictions are not part of it: they limit the logins of
+// the account holder and are checked in CheckLoginConditions.
+func (u *User) CheckAccountValidity() error {
 	if u.Status < 1 {
 		return fmt.Errorf("user %q is disabled", u.Username)
 	}
 	if u.ExpirationDate > 0 && u.ExpirationDate < util.GetTimeAsMsSinceEpoch(time.Now()) {
 		return fmt.Errorf("user %q is expired, expiration timestamp: %v current timestamp: %v", u.Username,
 			u.ExpirationDate, util.GetTimeAsMsSinceEpoch(time.Now()))
+	}
+	return nil
+}
+
+// CheckLoginConditions checks user access restrictions
+func (u *User) CheckLoginConditions() error {
+	if err := u.CheckAccountValidity(); err != nil {
+		return err
 	}
 	if u.isTimeBasedAccessAllowed(time.Now()) {
 		return nil
@@ -677,7 +687,7 @@ func (u *User) GetFilesystemForPath(virtualPath, connectionID string) (vfs.Fs, e
 	defer cache.Unlock()
 
 	if existing, ok := cache.entries[cacheKey]; ok {
-		fs.Close() //nolint:errcheck
+		fs.Close()
 		return existing, nil
 	}
 	cache.entries[cacheKey] = fs
@@ -1072,6 +1082,27 @@ func (u *User) getPatternsFilterForPath(virtualPath string) sdk.PatternsFilter {
 	return filter
 }
 
+// FilePatternsScopeChanges returns true if moving virtualSourcePath to
+// virtualTargetPath would change which file pattern filters govern the moved
+// contents.
+func (u *User) FilePatternsScopeChanges(virtualSourcePath, virtualTargetPath string) bool {
+	if len(u.Filters.FilePatterns) == 0 {
+		return false
+	}
+	for idx := range u.Filters.FilePatterns {
+		p := u.Filters.FilePatterns[idx].Path
+		// a filter defined on the moved tree stays behind, one defined on the
+		// target tree starts to apply
+		if p == virtualSourcePath || strings.HasPrefix(p, virtualSourcePath+"/") ||
+			p == virtualTargetPath || strings.HasPrefix(p, virtualTargetPath+"/") {
+			return true
+		}
+	}
+	// the inherited filter must be the same on both sides
+	return u.getPatternsFilterForPath(virtualSourcePath).Path !=
+		u.getPatternsFilterForPath(virtualTargetPath).Path
+}
+
 func (u *User) isDirHidden(virtualPath string) bool {
 	if len(u.Filters.FilePatterns) == 0 {
 		return false
@@ -1080,8 +1111,11 @@ func (u *User) isDirHidden(virtualPath string) bool {
 		if dirPath == "/" {
 			return false
 		}
-		filter := u.getPatternsFilterForPath(dirPath)
-		if filter.DenyPolicy == sdk.DenyPolicyHide && filter.Path != dirPath {
+		// The name of a directory is governed by the filter defined for its
+		// parent: the filter defined for the directory itself describes the
+		// entries it carries, not its own name.
+		filter := u.getPatternsFilterForPath(path.Dir(dirPath))
+		if filter.DenyPolicy == sdk.DenyPolicyHide {
 			if !filter.CheckAllowed(path.Base(dirPath)) {
 				return true
 			}
@@ -1548,6 +1582,14 @@ func (u *User) applyGroupSettings(groupsMapping map[string]Group) {
 
 // LoadAndApplyGroupSettings update the user by loading and applying the group settings
 func (u *User) LoadAndApplyGroupSettings() error {
+	err := u.loadAndApplyGroupSettings()
+	if u.Filters.IsAnonymous {
+		u.setAnonymousSettings()
+	}
+	return err
+}
+
+func (u *User) loadAndApplyGroupSettings() error {
 	if !u.hasSettingsFromGroups() {
 		return nil
 	}
@@ -1669,7 +1711,7 @@ func (u *User) mergeWithPrimaryGroup(group *Group, replacer *strings.Replacer) {
 	u.mergeAdditiveProperties(group, sdk.GroupTypePrimary, replacer)
 }
 
-func (u *User) mergePrimaryGroupFilters(filters *sdk.BaseUserFilters, replacer *strings.Replacer) { //nolint:gocyclo
+func (u *User) mergePrimaryGroupFilters(filters *sdk.BaseUserFilters, replacer *strings.Replacer) {
 	if u.Filters.MaxUploadFileSize == 0 {
 		u.Filters.MaxUploadFileSize = filters.MaxUploadFileSize
 	}

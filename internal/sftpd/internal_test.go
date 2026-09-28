@@ -592,6 +592,9 @@ func TestCommandsWithExtensionsFilter(t *testing.T) {
 			Status:   1,
 		},
 	}
+	user.Permissions = map[string][]string{
+		"/": {dataprovider.PermAny},
+	}
 	user.Filters.FilePatterns = []sdk.PatternsFilter{
 		{
 			Path:            "/subdir",
@@ -611,6 +614,65 @@ func TestCommandsWithExtensionsFilter(t *testing.T) {
 	}
 	err := cmd.handleHashCommands()
 	assert.EqualError(t, err, common.ErrPermissionDenied.Error())
+}
+
+func TestHashCommandPathPermissions(t *testing.T) {
+	buf := make([]byte, 65535)
+	stdErrBuf := make([]byte, 65535)
+	mockSSHChannel := MockChannel{
+		Buffer:       bytes.NewBuffer(buf),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+	}
+	homeDir := filepath.Join(os.TempDir(), "hash_path_perms")
+	err := os.MkdirAll(filepath.Join(homeDir, "data", "sub"), os.ModePerm)
+	assert.NoError(t, err)
+
+	defer os.RemoveAll(homeDir)
+
+	err = os.WriteFile(filepath.Join(homeDir, "data", "secret.txt"), []byte("secret"), 0o600)
+	assert.NoError(t, err)
+	err = os.WriteFile(filepath.Join(homeDir, "data", "sub", "file.txt"), []byte("sub"), 0o600)
+	assert.NoError(t, err)
+
+	user := dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Username: "test",
+			HomeDir:  homeDir,
+			Status:   1,
+		},
+	}
+	// the pattern matches the subdirectories of "/data", not "/data" itself, so the
+	// files directly inside it are governed by the root permissions
+	user.Permissions = map[string][]string{
+		"/":       {dataprovider.PermListItems},
+		"/data/*": {dataprovider.PermAny},
+	}
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection("", common.ProtocolSSH, "", "", user),
+		channel:        &mockSSHChannel,
+	}
+	cmd := sshCommand{
+		command:    "md5sum",
+		connection: connection,
+		args:       []string{"/data/secret.txt"},
+	}
+	err = cmd.handleHashCommands()
+	assert.EqualError(t, err, common.ErrPermissionDenied.Error())
+	cmd = sshCommand{
+		command:    "md5sum",
+		connection: connection,
+		args:       []string{"/data/secret.txt/"},
+	}
+	err = cmd.handleHashCommands()
+	assert.ErrorContains(t, err, "directory")
+	// the pattern grants the permission where it is meant to
+	cmd = sshCommand{
+		command:    "md5sum",
+		connection: connection,
+		args:       []string{"/data/sub/file.txt"},
+	}
+	err = cmd.handleHashCommands()
+	assert.NoError(t, err)
 }
 
 func TestSSHCommandsRemoteFs(t *testing.T) {
@@ -718,7 +780,7 @@ func TestCommandGetFsError(t *testing.T) {
 
 	err := scpCommand.handleRecursiveUpload()
 	assert.Error(t, err)
-	err = scpCommand.handleDownload("")
+	err = scpCommand.handleDownload("", 0)
 	assert.Error(t, err)
 }
 
@@ -843,6 +905,43 @@ func TestSCPInvalidEndDir(t *testing.T) {
 	assert.EqualError(t, err, "unacceptable end dir command")
 }
 
+func TestSCPMessageSizeLimit(t *testing.T) {
+	stdErrBuf := make([]byte, 65535)
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, "", "", dataprovider.User{
+			BaseUser: sdk.BaseUser{
+				HomeDir: os.TempDir(),
+			},
+		}),
+	}
+	scpCommand := scpCommand{
+		sshCommand: sshCommand{
+			command:    "scp",
+			connection: connection,
+			args:       []string{"-t", "/tmp"},
+		},
+	}
+
+	protocolMsg := bytes.Repeat([]byte("A"), maxSCPMessageSize+1)
+	connection.channel = &MockChannel{
+		Buffer:       bytes.NewBuffer(protocolMsg),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+	}
+	_, err := scpCommand.readProtocolMessage()
+	assert.ErrorContains(t, err, "scp protocol message too long")
+
+	confirmationMsg := append([]byte{warnMsg[0]}, bytes.Repeat([]byte("A"), maxSCPMessageSize+1)...)
+	connection.channel = &MockChannel{
+		Buffer:       bytes.NewBuffer(confirmationMsg),
+		StdErrBuffer: bytes.NewBuffer(stdErrBuf),
+	}
+	err = scpCommand.readConfirmationMessage()
+	assert.ErrorContains(t, err, "scp error message too long")
+
+	assert.Len(t, common.Connections.GetStats(""), 0)
+	assert.Equal(t, int32(0), common.Connections.GetTotalTransfers())
+}
+
 func TestSCPParseUploadMessage(t *testing.T) {
 	buf := make([]byte, 65535)
 	stdErrBuf := make([]byte, 65535)
@@ -878,6 +977,93 @@ func TestSCPParseUploadMessage(t *testing.T) {
 
 	_, _, err = scpCommand.parseUploadMessage(fs, "D0755 0 ")
 	assert.Error(t, err, "parsing upload message with invalid name must fail")
+
+	for _, name := range []string{".", "..", "../name", "sub/name", `..\name`, `sub\name`, "/name"} {
+		_, _, err = scpCommand.parseUploadMessage(fs, "C0644 5 "+name)
+		assert.ErrorContains(t, err, "invalid name", "name %q must be rejected", name)
+
+		_, _, err = scpCommand.parseUploadMessage(fs, "D0755 0 "+name)
+		assert.ErrorContains(t, err, "invalid name", "name %q must be rejected", name)
+	}
+
+	for _, name := range []string{"file with spaces.txt", ".bashrc", "..foo", "a.b.c", "...", "-", "name ", "name."} {
+		size, parsed, err := scpCommand.parseUploadMessage(fs, "C0644 5 "+name)
+		assert.NoError(t, err, "name %q must be accepted", name)
+		assert.Equal(t, int64(5), size)
+		assert.Equal(t, name, parsed)
+	}
+}
+
+func TestSCPUploadDestinationScope(t *testing.T) {
+	runUpload := func(t *testing.T, stream string) (string, error) {
+		t.Helper()
+
+		homeDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(homeDir, "base", "sub"), os.ModePerm))
+
+		user := dataprovider.User{
+			BaseUser: sdk.BaseUser{
+				HomeDir:     homeDir,
+				Permissions: map[string][]string{"/": {dataprovider.PermAny}},
+			},
+		}
+		mockSSHChannel := MockChannel{
+			Buffer:       bytes.NewBuffer([]byte(stream)),
+			StdErrBuffer: bytes.NewBuffer(make([]byte, 65535)),
+		}
+		connection := &Connection{
+			BaseConnection: common.NewBaseConnection("", common.ProtocolSCP, "", "", user),
+			channel:        &mockSSHChannel,
+		}
+		defer connection.CloseFS()
+		scpCommand := scpCommand{
+			sshCommand: sshCommand{
+				command:    "scp",
+				connection: connection,
+				args:       []string{"-r", "-t", "/base/sub"},
+			},
+		}
+		return homeDir, scpCommand.handleRecursiveUpload()
+	}
+
+	// The whole tree is compared, so a write nested anywhere is detected too.
+	treeOf := func(t *testing.T, homeDir string) []string {
+		t.Helper()
+
+		var entries []string
+		require.NoError(t, filepath.WalkDir(homeDir, func(p string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if rel, err := filepath.Rel(homeDir, p); err == nil && rel != "." {
+				entries = append(entries, filepath.ToSlash(rel))
+			}
+			return nil
+		}))
+		return entries
+	}
+
+	for _, stream := range []string{
+		"D0755 0 .\nE\nD0755 0 .\nE\nC0644 5 file1\nhello\x00",
+		"C0644 5 ../../file1\nhello\x00",
+		"C0644 5 ..\\..\\..\\file1\nhello\x00",
+		"D0755 0 ../../dir1\n",
+		"E\n",
+	} {
+		homeDir, err := runUpload(t, stream)
+		assert.Error(t, err, "stream %q must be rejected", stream)
+		assert.Equal(t, []string{"base", "base/sub"}, treeOf(t, homeDir),
+			"stream %q must not create anything", stream)
+	}
+
+	// A well formed recursive upload, as a control that the check does not
+	// reject the ordinary case.
+	homeDir, err := runUpload(t, "D0755 0 dir1\nC0644 5 file1\nhello\x00D0755 0 dir2\nC0644 5 file2\nhello\x00E\nE\n")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"base", "base/sub", "base/sub/dir1", "base/sub/dir1/dir2",
+		"base/sub/dir1/dir2/file2", "base/sub/dir1/file1",
+	}, treeOf(t, homeDir))
 }
 
 func TestSCPProtocolMessages(t *testing.T) {
@@ -948,7 +1134,7 @@ func TestSCPProtocolMessages(t *testing.T) {
 	}
 	scpCommand.connection.channel = &mockSSHChannel
 
-	err = scpCommand.downloadDirs(nil, nil)
+	err = scpCommand.downloadDirs(nil, 0)
 	assert.ErrorIs(t, err, writeErr)
 }
 
@@ -1140,7 +1326,7 @@ func TestSCPRecursiveDownloadErrors(t *testing.T) {
 	assert.NoError(t, err)
 	stat, err := os.Stat(path)
 	assert.NoError(t, err)
-	err = scpCommand.handleRecursiveDownload(fs, "invalid_dir", "invalid_dir", stat)
+	err = scpCommand.handleRecursiveDownload(fs, "invalid_dir", "invalid_dir", stat, 0)
 	assert.EqualError(t, err, writeErr.Error())
 
 	mockSSHChannel = MockChannel{
@@ -1150,8 +1336,11 @@ func TestSCPRecursiveDownloadErrors(t *testing.T) {
 		WriteError:   nil,
 	}
 	scpCommand.connection.channel = &mockSSHChannel
-	err = scpCommand.handleRecursiveDownload(fs, "invalid_dir", "invalid_dir", stat)
+	err = scpCommand.handleRecursiveDownload(fs, "invalid_dir", "invalid_dir", stat, 0)
 	assert.Error(t, err, "recursive upload download must fail for a non existing dir")
+
+	err = scpCommand.handleRecursiveDownload(fs, "invalid_dir", "invalid_dir", stat, util.MaxRecursion)
+	assert.ErrorIs(t, err, util.ErrRecursionTooDeep)
 
 	err = os.Remove(path)
 	assert.NoError(t, err)
@@ -1492,11 +1681,12 @@ func TestConfigsFromProvider(t *testing.T) {
 	assert.Len(t, c.PublicKeyAlgorithms, 0)
 	configs := dataprovider.Configs{
 		SFTPD: &dataprovider.SFTPDConfigs{
-			HostKeyAlgos:   []string{ssh.KeyAlgoRSA},
-			KexAlgorithms:  []string{ssh.InsecureKeyExchangeDHGEXSHA1},
-			Ciphers:        []string{ssh.InsecureCipherAES128CBC},
-			MACs:           []string{ssh.HMACSHA512ETM},
-			PublicKeyAlgos: []string{ssh.InsecureKeyAlgoDSA}, //nolint:staticcheck
+			HostKeyAlgos:  []string{ssh.KeyAlgoRSA},
+			KexAlgorithms: []string{ssh.InsecureKeyExchangeDHGEXSHA1},
+			Ciphers:       []string{ssh.InsecureCipherAES128CBC},
+			MACs:          []string{ssh.HMACSHA512ETM},
+			//lint:ignore SA1019 the test covers the DSA algorithm
+			PublicKeyAlgos: []string{ssh.InsecureKeyAlgoDSA},
 		},
 	}
 	err = dataprovider.UpdateConfigs(&configs, "", "", "")
@@ -1872,7 +2062,7 @@ func (f mockCommandExecutor) CombinedOutput(ctx context.Context, name string, ar
 
 func TestVerifyWithOPKSSH(t *testing.T) {
 	sshCert := []byte(`ssh-rsa-cert-v01@openssh.com AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAg4+hKHVPKv183MU/Q7XD/mzDBFSc2YY3eraltxLMGJo0AAAADAQABAAABAQCe6jMoy1xCQgiZkZJ7gi6NLj4uRqz2OaUGK/OJYZTfBqK+SlS9iymAluHu9K+cc4+0qxx0gn7dRTJWINSgzvca6ayYe995EKgD1hE5krh9BH0bRrXB+hGqyslcZOgLNO+v8jYojClQbRtET2tS+xb4k33GCuL5wgla2790ZgOQgs7huQUjG0S8c1W+EYt6fI4cWE/DeEBnv9sqryS8rOb0PbM6WUd7XBadwySFWYQUX0ei56GNt12Z4gADEGlFQV/OnV0PvnTcAMGUl0rfToPgJ4jgogWKoTVWuZ9wyA/x+2LRLRvgm2a969ig937/AH0i0Wq+FzqfK7EXQ99Yf5K/AAAAAAAAAAAAAAACAAAAFGhvc3QuZXhhbXBsZS5jb20ta2V5AAAAFAAAABBob3N0LmV4YW1wbGUuY29tAAAAAGXEzYAAAAAAd8sP4wAAAAAAAAAAAAAAAAAAARcAAAAHc3NoLXJzYQAAAAMBAAEAAAEBAL4PXUPSERufZWCW/hhEnylk3IeMgaa+2HcNY5Cur77a8fYy6OYZAPF+vhJUT0akwGUpTeXAZumAgHECDrJlw1J+jo9ZVT0AKDo0wU77IzNzYxob7+dpB02NJ7DLAXmPauQ07Zc5pWJFVKtmuh7YH9pjYtNXSMOXye7k06PBGzX+ztIt7nPWvD9fR2mZeTSoljeBCGZHwdlnV2ESQlQbBoEI93RPxqxJh/UCDatQPhpDbyverr2ZvB9Y45rqsx6ZVmu5RXl3MfBU1U21W/4ia2di3PybyD4rSmVoam0efcqxo6cBKSHe26OFoTuS9zgdH0iCWL37vqOFmJ7eH91M3nMAAAEUAAAADHJzYS1zaGEyLTI1NgAAAQA/ByIegNZYJRRl413S/8LxGvTZnbxsPwaluoJ/54niGZV9P28THz7d9jXfSHPjalhH93jNPfTYXvI4opnDC37ua1Nu8KKfk40IWXnnDdZLWraUxEidIzhmfVtz8kGdGoFQ8H0EzubL7zKNOTlfSfOoDlmQVOuxT/+eh2mEp4ri0/+8J1mLfLBr8tREX0/iaNjK+RKdcyTMicKursAYMCDdu8vlaphxea+ocyHM9izSX/l33t44V13ueTqIOh2Zbl2UE2k+jk+0dc1CmV0SEoiWiIyt8TRM4yQry1vPlQLsrf28sYM/QMwnhCVhyZO3vs5F25aQWrB9d51VEzBW9/fd host.example.com`)
-	key, _, _, _, err := ssh.ParseAuthorizedKey(sshCert) //nolint:dogsled
+	key, _, _, _, err := ssh.ParseAuthorizedKey(sshCert)
 	require.NoError(t, err)
 	cert, ok := key.(*ssh.Certificate)
 	require.True(t, ok)
@@ -1900,7 +2090,7 @@ func TestVerifyWithOPKSSH(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestOsFsRootEscapeMatrix(t *testing.T) { //nolint:gocyclo
+func TestOsFsRootEscapeMatrix(t *testing.T) {
 	if runtime.GOOS == osWindows {
 		t.Skip(`This test is POSIX-specific`)
 	}

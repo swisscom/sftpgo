@@ -170,7 +170,7 @@ func TestMain(m *testing.M) {
 	httpConfig := config.GetHTTPConfig()
 	httpConfig.Timeout = 5
 	httpConfig.RetryMax = 0
-	httpConfig.Initialize(configDir) //nolint:errcheck
+	httpConfig.Initialize(configDir)
 	kmsConfig := config.GetKMSConfig()
 	err = kmsConfig.Initialize()
 	if err != nil {
@@ -245,7 +245,7 @@ func TestMain(m *testing.M) {
 				fmt.Fprintf(w, "KO\n")
 				return
 			}
-			defer r.MultipartForm.RemoveAll() //nolint:errcheck
+			defer r.MultipartForm.RemoveAll()
 			fmt.Fprintf(w, "OK\n")
 		})
 		if err := http.ListenAndServe(httpAddr, nil); err != nil {
@@ -255,18 +255,17 @@ func TestMain(m *testing.M) {
 	}()
 
 	go func() {
-		common.Config.ProxyProtocol = 2
 		listener, err := net.Listen("tcp", httpProxyAddr)
 		if err != nil {
 			logger.ErrorToConsole("error creating listener for proxy protocol server: %v", err)
 			os.Exit(1)
 		}
-		proxyListener, err := common.Config.GetProxyListener(listener)
+		proxyConf := common.Configuration{ProxyProtocol: 2}
+		proxyListener, err := proxyConf.GetProxyListener(listener)
 		if err != nil {
 			logger.ErrorToConsole("error creating proxy protocol listener: %v", err)
 			os.Exit(1)
 		}
-		common.Config.ProxyProtocol = 0
 
 		s := &http.Server{}
 		if err := s.Serve(proxyListener); err != nil {
@@ -981,7 +980,7 @@ func TestHiddenPatternFilter(t *testing.T) {
 		err = client.RemoveDirectory(path.Join(deniedDir, dirName))
 		assert.ErrorIs(t, err, os.ErrNotExist)
 		err = client.Rename(path.Join(deniedDir, dirName), path.Join(deniedDir, "newname"))
-		assert.ErrorIs(t, err, os.ErrPermission)
+		assert.ErrorIs(t, err, os.ErrNotExist)
 		err = client.Mkdir(path.Join(deniedDir, "beta1"))
 		assert.ErrorIs(t, err, os.ErrPermission)
 		err = writeSFTPFile(path.Join(deniedDir, "afile.txt"), 1024, client)
@@ -1096,7 +1095,7 @@ func TestHiddenRoot(t *testing.T) {
 		err = writeSFTPFile("ftp123", 4096, client)
 		assert.ErrorIs(t, err, os.ErrPermission)
 		err = client.Rename(testFileName, testFileName+"_rename") //nolint:goconst
-		assert.ErrorIs(t, err, os.ErrPermission)
+		assert.ErrorIs(t, err, os.ErrNotExist)
 		err = writeSFTPFile(path.Join("/ftp", testFileName), 4096, client)
 		assert.NoError(t, err)
 		err = client.Mkdir("/ftp/dir")
@@ -3290,7 +3289,7 @@ func TestResolvePathError(t *testing.T) {
 	testPath := "apath"
 	_, err := conn.ListDir(testPath)
 	assert.Error(t, err)
-	err = conn.CreateDir(testPath, true)
+	err = conn.CreateDir(testPath)
 	assert.Error(t, err)
 	err = conn.RemoveDir(testPath)
 	assert.Error(t, err)
@@ -9669,7 +9668,7 @@ func TestHTTPFs(t *testing.T) {
 	assert.NoError(t, err)
 
 	conn := common.NewBaseConnection(xid.New().String(), common.ProtocolFTP, "", "", user)
-	err = conn.CreateDir(httpFsWellKnowDir, false)
+	err = conn.CreateDir(httpFsWellKnowDir)
 	assert.NoError(t, err)
 
 	err = os.WriteFile(filepath.Join(os.TempDir(), "httpfs", defaultHTTPFsUsername, httpFsWellKnowDir, "file.txt"), []byte("data"), 0666)

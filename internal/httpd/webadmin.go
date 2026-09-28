@@ -2053,7 +2053,7 @@ func getUserFromPostFields(r *http.Request) (dataprovider.User, error) {
 	if err != nil {
 		return user, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	updateRepeaterFormFields(r)
 
@@ -2149,7 +2149,7 @@ func getGroupFromPostFields(r *http.Request) (dataprovider.Group, error) {
 	if err != nil {
 		return group, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	updateRepeaterFormFields(r)
 
@@ -3003,7 +3003,7 @@ func (s *httpdServer) handleWebRestore(w http.ResponseWriter, r *http.Request) {
 		s.renderMaintenancePage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r, s.csrfTokenAuth); err != nil {
@@ -3169,7 +3169,10 @@ func (s *httpdServer) handleWebUpdateAdminPost(w http.ResponseWriter, r *http.Re
 		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken), false)
 		return
 	}
+	executor := claims.Username
 	if username == claims.Username {
+		executor = dataprovider.ActionExecutorSelf
+		updatedAdmin.UpdatedAt = admin.UpdatedAt
 		if !util.SlicesEqual(admin.Permissions, updatedAdmin.Permissions) {
 			s.renderAddUpdateAdminPage(w, r, &updatedAdmin,
 				util.NewI18nError(errors.New("you cannot change your permissions"),
@@ -3195,7 +3198,7 @@ func (s *httpdServer) handleWebUpdateAdminPost(w http.ResponseWriter, r *http.Re
 		updatedAdmin.Filters.RequirePasswordChange = admin.Filters.RequirePasswordChange
 		updatedAdmin.Filters.RequireTwoFactor = admin.Filters.RequireTwoFactor
 	}
-	err = dataprovider.UpdateAdmin(&updatedAdmin, claims.Username, ipAddr, claims.Role)
+	err = dataprovider.UpdateAdmin(&updatedAdmin, executor, ipAddr, claims.Role)
 	if err != nil {
 		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, err, false)
 		return
@@ -3276,7 +3279,7 @@ func (s *httpdServer) handleWebTemplateFolderPost(w http.ResponseWriter, r *http
 		s.renderMessagePage(w, r, util.I18nTemplateFolderTitle, http.StatusBadRequest, util.NewI18nError(err, util.I18nErrorInvalidForm), "")
 		return
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r, s.csrfTokenAuth); err != nil {
@@ -3581,7 +3584,7 @@ func (s *httpdServer) handleWebAddFolderPost(w http.ResponseWriter, r *http.Requ
 		s.renderFolderPage(w, r, folder, folderPageModeAdd, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r, s.csrfTokenAuth); err != nil {
@@ -3642,7 +3645,7 @@ func (s *httpdServer) handleWebUpdateFolderPost(w http.ResponseWriter, r *http.R
 		s.renderFolderPage(w, r, folder, folderPageModeUpdate, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r, s.csrfTokenAuth); err != nil {
@@ -4331,7 +4334,7 @@ func (s *httpdServer) handleWebConfigsPost(w http.ResponseWriter, r *http.Reques
 		s.renderBadRequestPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+	defer r.MultipartForm.RemoveAll()
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r, s.csrfTokenAuth); err != nil {
@@ -4411,6 +4414,12 @@ func (s *httpdServer) handleOAuth2TokenRedirect(w http.ResponseWriter, r *http.R
 		oauth2Mgr.removePendingAuth(state)
 		s.renderMessagePage(w, r, util.I18nOAuth2ErrorTitle, http.StatusInternalServerError,
 			util.NewI18nError(err, util.I18nOAuth2ErrorValidateState), "")
+		return
+	}
+	if !checkAuthBrowserID(r, oauth2BrowserCookieKey, pendingAuth.Browser) {
+		s.renderMessagePage(w, r, util.I18nOAuth2ErrorTitle, http.StatusBadRequest,
+			util.NewI18nError(errors.New("the authorization request was started by a different browser"),
+				util.I18nOAuth2InvalidState), "")
 		return
 	}
 	oauth2Mgr.removePendingAuth(state)

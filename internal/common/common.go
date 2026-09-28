@@ -140,6 +140,7 @@ func init() {
 	Connections.perUserConns = make(map[string]int)
 	Connections.mapping = make(map[string]int)
 	Connections.sshMapping = make(map[string]int)
+	proxyproto.V1AcceptIPv4InTCP6 = true
 }
 
 // errors definitions
@@ -1207,11 +1208,10 @@ func (conns *ActiveConnections) checkIdles() {
 }
 
 func (conns *ActiveConnections) checkTransfers() {
-	if conns.transfersCheckStatus.Load() {
+	if !conns.transfersCheckStatus.CompareAndSwap(false, true) {
 		logger.Warn(logSender, "", "the previous transfer check is still running, skipping execution")
 		return
 	}
-	conns.transfersCheckStatus.Store(true)
 	defer conns.transfersCheckStatus.Store(false)
 
 	conns.RLock()

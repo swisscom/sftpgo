@@ -29,7 +29,7 @@ info:
     SFTPGo supports groups to simplify the administration of multiple accounts by letting you assign settings once to a group, instead of multiple times to each individual user.
     The SFTPGo WebClient allows end users to change their credentials, browse and manage their files in the browser and setup two-factor authentication which works with Authy, Google Authenticator and other compatible apps.
     From the WebClient each authorized user can also create HTTP/S links to externally share files and folders securely, by setting limits to the number of downloads/uploads, protecting the share with a password, limiting access by source IP address, setting an automatic expiration date.
-  version: v2.7.5
+  version: v2.7.6
   contact:
     name: API support
     url: 'https://github.com/drakkan/sftpgo'
@@ -458,6 +458,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -513,6 +515,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -566,6 +570,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -719,6 +725,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -3226,7 +3234,7 @@ paths:
       tags:
         - admins
       summary: Send a password reset code by email
-      description: 'You must set up an SMTP server and the account must have a valid email address, in which case SFTPGo will send a code via email to reset the password. If the specified admin does not exist, the request will be silently ignored (a success response will be returned) to avoid disclosing existing admins'
+      description: 'You must set up an SMTP server. SFTPGo will send a code via email to reset the password if the specified admin exists and has a valid email address. Requests that do not meet these conditions are silently ignored (a success response will be returned) to avoid disclosing existing admins'
       operationId: admin_forgot_password
       responses:
         '200':
@@ -3544,7 +3552,7 @@ paths:
       tags:
         - users
       summary: Send a password reset code by email
-      description: 'You must configure an SMTP server, the account must have a valid email address and must not have the "reset-password-disabled" restriction, in which case SFTPGo will send a code via email to reset the password. If the specified user does not exist, the request will be silently ignored (a success response will be returned) to avoid disclosing existing users'
+      description: 'You must configure an SMTP server. SFTPGo will send a code via email to reset the password if the specified user exists, has a valid email address and does not have the "reset-password-disabled" restriction. Requests that do not meet these conditions are silently ignored (a success response will be returned) to avoid disclosing existing users'
       operationId: user_forgot_password
       responses:
         '200':
@@ -3815,6 +3823,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -3870,6 +3880,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -3923,6 +3935,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -4074,6 +4088,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         default:
@@ -5413,7 +5429,7 @@ components:
           enum:
             - 0
             - 1
-          description: 'Set to `1` to require TLS for both data and control connection. his setting is useful if you want to allow both encrypted and plain text FTP sessions globally and then you want to require encrypted sessions on a per-user basis. It has no effect if TLS is already required for all users in the configuration file.'
+          description: 'Set to `1` to require TLS for both data and control connection. This setting is useful to allow both encrypted and plain text FTP sessions globally and require encrypted sessions on a per-user basis. The requirement is enforced after the authentication, so it holds for accounts resolved during the login as well; cleartext sessions are closed before the password is sent when the account can be resolved beforehand. It has no effect if TLS is already required for all users in the configuration file.'
         is_anonymous:
           type: boolean
           description: 'If enabled the user can login with any password or no password at all. Anonymous users are supported for FTP and WebDAV protocols and permissions will be automatically set to "list" and "download" (read only)'

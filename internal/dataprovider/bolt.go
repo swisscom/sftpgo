@@ -228,7 +228,7 @@ func (p *BoltProvider) getUserSignature(username string) (string, error) {
 }
 
 func (p *BoltProvider) setUpdatedAt(username string) {
-	p.dbHandle.Update(func(tx *bolt.Tx) error { //nolint:errcheck
+	_ = p.dbHandle.Update(func(tx *bolt.Tx) error {
 		bucket, err := p.getUsersBucket(tx)
 		if err != nil {
 			return err
@@ -464,7 +464,7 @@ func (p *BoltProvider) addAdmin(admin *Admin) error {
 	})
 }
 
-func (p *BoltProvider) updateAdmin(admin *Admin) error {
+func (p *BoltProvider) updateAdmin(admin *Admin, expectedUpdatedAt int64) error {
 	err := admin.validate()
 	if err != nil {
 		return err
@@ -491,7 +491,9 @@ func (p *BoltProvider) updateAdmin(admin *Admin) error {
 		if err != nil {
 			return err
 		}
-
+		if expectedUpdatedAt >= 0 && oldAdmin.UpdatedAt != expectedUpdatedAt {
+			return ErrConcurrentUpdate
+		}
 		if err = p.removeAdminFromRole(oldAdmin.Username, oldAdmin.Role, rolesBucket); err != nil {
 			return err
 		}
@@ -513,7 +515,7 @@ func (p *BoltProvider) updateAdmin(admin *Admin) error {
 		admin.ID = oldAdmin.ID
 		admin.CreatedAt = oldAdmin.CreatedAt
 		admin.LastLogin = oldAdmin.LastLogin
-		admin.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
+		admin.UpdatedAt = nextUpdatedAt(oldAdmin.UpdatedAt)
 		buf, err := json.Marshal(admin)
 		if err != nil {
 			return err
@@ -735,7 +737,7 @@ func (p *BoltProvider) addUser(user *User) error {
 	})
 }
 
-func (p *BoltProvider) updateUser(user *User) error {
+func (p *BoltProvider) updateUser(user *User, expectedUpdatedAt int64) error {
 	err := ValidateUser(user)
 	if err != nil {
 		return err
@@ -754,6 +756,9 @@ func (p *BoltProvider) updateUser(user *User) error {
 		if err != nil {
 			return err
 		}
+		if expectedUpdatedAt >= 0 && oldUser.UpdatedAt != expectedUpdatedAt {
+			return ErrConcurrentUpdate
+		}
 		if err = p.updateUserRelations(tx, user, oldUser); err != nil {
 			return err
 		}
@@ -767,7 +772,7 @@ func (p *BoltProvider) updateUser(user *User) error {
 		user.FirstDownload = oldUser.FirstDownload
 		user.FirstUpload = oldUser.FirstUpload
 		user.CreatedAt = oldUser.CreatedAt
-		user.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
+		user.UpdatedAt = nextUpdatedAt(oldUser.UpdatedAt)
 		buf, err := json.Marshal(user)
 		if err != nil {
 			return err
@@ -3191,7 +3196,7 @@ func (p *BoltProvider) migrateDatabase() error {
 	}
 }
 
-func (p *BoltProvider) revertDatabase(targetVersion int) error { //nolint:gocyclo
+func (p *BoltProvider) revertDatabase(targetVersion int) error {
 	dbVersion, err := getBoltDatabaseVersion(p.dbHandle)
 	if err != nil {
 		return err
