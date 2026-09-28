@@ -254,6 +254,11 @@ type Metadater interface {
 	Metadata() map[string]string
 }
 
+func addressesEntryInDir(name string) bool {
+	name = path.Base(name)
+	return name != "." && name != ".." && name != "/"
+}
+
 type baseDirLister struct {
 	cache []os.FileInfo
 }
@@ -613,7 +618,7 @@ func (c *GCSFsConfig) isSameResource(other GCSFsConfig) bool {
 }
 
 // validate returns an error if the configuration is not valid
-func (c *GCSFsConfig) validate() error { //nolint:gocyclo
+func (c *GCSFsConfig) validate() error {
 	if c.Credentials == nil || c.AutomaticCredentials == 1 {
 		c.Credentials = kms.NewEmptySecret()
 	}
@@ -944,7 +949,7 @@ func NewPipeWriter(w pipeWriterAt) PipeWriter {
 
 // Close waits for the upload to end, closes the pipeWriterAt and returns an error if any.
 func (p *pipeWriter) Close() error {
-	p.pipeWriterAt.Close() //nolint:errcheck // the returned error is always null
+	p.pipeWriterAt.Close() // the returned error is always null
 	<-p.done
 	return p.err
 }

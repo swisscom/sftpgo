@@ -51,6 +51,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/config"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/drakkan/sftpgo/v2/internal/ftpd"
+	"github.com/drakkan/sftpgo/v2/internal/httpd"
 	"github.com/drakkan/sftpgo/v2/internal/httpdtest"
 	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/logger"
@@ -266,7 +267,7 @@ var (
 	caCRLPath       string
 )
 
-func TestMain(m *testing.M) { //nolint:gocyclo
+func TestMain(m *testing.M) {
 	logFilePath = filepath.Join(configDir, "sftpgo_ftpd_test.log")
 	bannerFileName := "banner_file"
 	bannerFile := filepath.Join(configDir, bannerFileName)
@@ -327,7 +328,7 @@ func TestMain(m *testing.M) { //nolint:gocyclo
 	}
 
 	httpConfig := config.GetHTTPConfig()
-	httpConfig.Initialize(configDir) //nolint:errcheck
+	httpConfig.Initialize(configDir)
 
 	kmsConfig := config.GetKMSConfig()
 	err = kmsConfig.Initialize()
@@ -384,33 +385,33 @@ func TestMain(m *testing.M) { //nolint:gocyclo
 		os.Exit(1)
 	}
 
-	go func() {
-		logger.Debug(logSender, "", "initializing FTP server with config %+v", ftpdConf)
-		if err := ftpdConf.Initialize(configDir); err != nil {
+	go func(cfg ftpd.Configuration) {
+		logger.Debug(logSender, "", "initializing FTP server with config %+v", cfg)
+		if err := cfg.Initialize(configDir); err != nil {
 			logger.ErrorToConsole("could not start FTP server: %v", err)
 			os.Exit(1)
 		}
-	}()
+	}(ftpdConf)
 
-	go func() {
-		logger.Debug(logSender, "", "initializing SFTP server with config %+v", sftpdConf)
-		if err := sftpdConf.Initialize(configDir); err != nil {
+	go func(cfg sftpd.Configuration) {
+		logger.Debug(logSender, "", "initializing SFTP server with config %+v", cfg)
+		if err := cfg.Initialize(configDir); err != nil {
 			logger.ErrorToConsole("could not start SFTP server: %v", err)
 			os.Exit(1)
 		}
-	}()
+	}(sftpdConf)
 
-	go func() {
-		if err := httpdConf.Initialize(configDir, 0); err != nil {
+	go func(cfg httpd.Conf) {
+		if err := cfg.Initialize(configDir, 0); err != nil {
 			logger.ErrorToConsole("could not start HTTP server: %v", err)
 			os.Exit(1)
 		}
-	}()
+	}(httpdConf)
 
 	waitTCPListening(ftpdConf.Bindings[0].GetAddress())
 	waitTCPListening(httpdConf.Bindings[0].GetAddress())
 	waitTCPListening(sftpdConf.Bindings[0].GetAddress())
-	ftpd.ReloadCertificateMgr() //nolint:errcheck
+	ftpd.ReloadCertificateMgr()
 
 	ftpdConf = config.GetFTPDConfig()
 	ftpdConf.Bindings = []ftpd.Binding{
@@ -428,13 +429,13 @@ func TestMain(m *testing.M) { //nolint:gocyclo
 	ftpdConf.CombineSupport = 1
 	ftpdConf.HASHSupport = 1
 
-	go func() {
-		logger.Debug(logSender, "", "initializing FTP server with config %+v", ftpdConf)
-		if err := ftpdConf.Initialize(configDir); err != nil {
+	go func(cfg ftpd.Configuration) {
+		logger.Debug(logSender, "", "initializing FTP server with config %+v", cfg)
+		if err := cfg.Initialize(configDir); err != nil {
 			logger.ErrorToConsole("could not start FTP server: %v", err)
 			os.Exit(1)
 		}
-	}()
+	}(ftpdConf)
 
 	waitTCPListening(ftpdConf.Bindings[0].GetAddress())
 
@@ -451,13 +452,13 @@ func TestMain(m *testing.M) { //nolint:gocyclo
 	ftpdConf.CACertificates = []string{caCrtPath}
 	ftpdConf.CARevocationLists = []string{caCRLPath}
 
-	go func() {
-		logger.Debug(logSender, "", "initializing FTP server with config %+v", ftpdConf)
-		if err := ftpdConf.Initialize(configDir); err != nil {
+	go func(cfg ftpd.Configuration) {
+		logger.Debug(logSender, "", "initializing FTP server with config %+v", cfg)
+		if err := cfg.Initialize(configDir); err != nil {
 			logger.ErrorToConsole("could not start FTP server: %v", err)
 			os.Exit(1)
 		}
-	}()
+	}(ftpdConf)
 
 	waitTCPListening(ftpdConf.Bindings[0].GetAddress())
 
@@ -938,17 +939,13 @@ func TestAnonymousUser(t *testing.T) {
 	u := getTestUser()
 	u.Password = ""
 	u.Filters.IsAnonymous = true
-	_, _, err := httpdtest.AddUser(u, http.StatusCreated)
-	assert.Error(t, err)
-	user, _, err := httpdtest.GetUserByUsername(u.Username, http.StatusOK)
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	assert.True(t, user.Filters.IsAnonymous)
-	assert.Equal(t, []string{dataprovider.PermListItems, dataprovider.PermDownload}, user.Permissions["/"])
-	assert.Equal(t, []string{common.ProtocolSSH, common.ProtocolHTTP}, user.Filters.DeniedProtocols)
-	assert.Equal(t, []string{dataprovider.SSHLoginMethodPublicKey, dataprovider.SSHLoginMethodPassword,
-		dataprovider.SSHLoginMethodKeyboardInteractive, dataprovider.SSHLoginMethodKeyAndPassword,
-		dataprovider.SSHLoginMethodKeyAndKeyboardInt, dataprovider.LoginMethodTLSCertificate,
-		dataprovider.LoginMethodTLSCertificateAndPwd}, user.Filters.DeniedLoginMethods)
+	// the restrictions apply to the session, the stored account keeps its settings
+	assert.Equal(t, allPerms, user.Permissions["/"])
+	assert.Empty(t, user.Filters.DeniedProtocols)
+	assert.Empty(t, user.Filters.DeniedLoginMethods)
 
 	user.Password = emptyPwdPlaceholder
 	client, err := getFTPClient(user, true, nil)
@@ -1449,12 +1446,10 @@ func TestPreLoginHookReturningAnonymousUser(t *testing.T) {
 	user, _, err := httpdtest.GetUserByUsername(defaultUsername, http.StatusOK)
 	assert.NoError(t, err)
 	assert.True(t, user.Filters.IsAnonymous)
-	assert.Equal(t, []string{dataprovider.PermListItems, dataprovider.PermDownload}, user.Permissions["/"])
-	assert.Equal(t, []string{common.ProtocolSSH, common.ProtocolHTTP}, user.Filters.DeniedProtocols)
-	assert.Equal(t, []string{dataprovider.SSHLoginMethodPublicKey, dataprovider.SSHLoginMethodPassword,
-		dataprovider.SSHLoginMethodKeyboardInteractive, dataprovider.SSHLoginMethodKeyAndPassword,
-		dataprovider.SSHLoginMethodKeyAndKeyboardInt, dataprovider.LoginMethodTLSCertificate,
-		dataprovider.LoginMethodTLSCertificateAndPwd}, user.Filters.DeniedLoginMethods)
+	// the restrictions apply to the session, the stored account keeps the settings the hook returned
+	assert.Equal(t, allPerms, user.Permissions["/"])
+	assert.Equal(t, []string{common.ProtocolSSH}, user.Filters.DeniedProtocols)
+	assert.Empty(t, user.Filters.DeniedLoginMethods)
 	// now the same with an existing user
 	client, err = getFTPClient(u, false, nil)
 	if assert.NoError(t, err) {
@@ -1672,7 +1667,6 @@ func TestPostConnectHook(t *testing.T) {
 	common.Config.PostConnectHook = ""
 }
 
-//nolint:dupl
 func TestMaxConnections(t *testing.T) {
 	oldValue := common.Config.MaxTotalConnections
 	common.Config.MaxTotalConnections = 1
@@ -1702,7 +1696,6 @@ func TestMaxConnections(t *testing.T) {
 	common.Config.MaxTotalConnections = oldValue
 }
 
-//nolint:dupl
 func TestMaxPerHostConnections(t *testing.T) {
 	oldValue := common.Config.MaxPerHostConnections
 	common.Config.MaxPerHostConnections = 1
@@ -2275,7 +2268,6 @@ func TestResume(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-//nolint:dupl
 func TestDeniedLoginMethod(t *testing.T) {
 	u := getTestUser()
 	u.Filters.DeniedLoginMethods = []string{dataprovider.LoginMethodPassword}
@@ -2298,7 +2290,6 @@ func TestDeniedLoginMethod(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-//nolint:dupl
 func TestDeniedProtocols(t *testing.T) {
 	u := getTestUser()
 	u.Filters.DeniedProtocols = []string{common.ProtocolFTP}
@@ -3555,6 +3546,46 @@ func TestClientCertificateAuthRevokedCert(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestAnonymousGroupInheritanceClientCertificateAuth(t *testing.T) {
+	g := getTestGroup()
+	g.UserSettings.Filters.IsAnonymous = true
+	group, _, err := httpdtest.AddGroup(g, http.StatusCreated)
+	assert.NoError(t, err)
+
+	u := getTestUser()
+	u.Username = tlsClient1Username
+	u.Filters.TLSUsername = sdk.TLSUsernameCN
+	u.Groups = []sdk.GroupMapping{
+		{
+			Name: group.Name,
+			Type: sdk.GroupTypePrimary,
+		},
+	}
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+
+	tlsConfig := &tls.Config{
+		ServerName:         "localhost",
+		InsecureSkipVerify: true, // use this for tests only
+		MinVersion:         tls.VersionTLS12,
+	}
+	tlsCert, err := tls.X509KeyPair([]byte(client1Crt), []byte(client1Key))
+	assert.NoError(t, err)
+	tlsConfig.Certificates = append(tlsConfig.Certificates, tlsCert)
+
+	_, err = getFTPClient(user, true, tlsConfig)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "login method TLSCertificate+password is not allowed")
+	}
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveGroup(group, http.StatusOK)
+	assert.NoError(t, err)
+}
+
 func TestClientCertificateAuth(t *testing.T) {
 	u := getTestUser()
 	u.Username = tlsClient1Username
@@ -3595,7 +3626,7 @@ func TestClientCertificateAuth(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = getFTPClient(user2, true, tlsConfig)
 	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "does not match username")
+		assert.Contains(t, err.Error(), "invalid credentials")
 	}
 	// add the certs to the user
 	user2.Filters.TLSUsername = sdk.TLSUsernameNone
@@ -3614,7 +3645,7 @@ func TestClientCertificateAuth(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = getFTPClient(user2, true, tlsConfig)
 	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "TLS certificate is not valid")
+		assert.Contains(t, err.Error(), "invalid credentials")
 	}
 
 	// now disable certificate authentication
@@ -3818,7 +3849,7 @@ func TestPreLoginHookWithClientCert(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = getFTPClient(u, true, tlsConfig)
 	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "does not match username")
+		assert.Contains(t, err.Error(), "invalid credentials")
 	}
 
 	user2, _, err := httpdtest.GetUserByUsername(tlsClient2Username, http.StatusOK)
